@@ -1,8 +1,3 @@
-/**
- * @param {string} user
- * @param {string} pass
- * @returns {string}
- */
 function basicAuth(user, pass) {
   return "Basic " + btoa(user + ":" + pass);
 }
@@ -16,75 +11,52 @@ const PREFLIGHT_INIT = {
   }),
 }
 
-const regExps = {
-  // 匹配 /v2/xxx 镜像拉取
-  v2: /^\/v2\/(?<name>.+)$/,
-  // 匹配 /token 鉴权接口
+const regs = {
   token: /^\/token$/,
-}
-
-/**
- * @param {Request} req
- * @param {Env} env
- * @returns {Promise<Response>}
- */
-async function handleRequest(req, env) {
-  const url = new URL(req.url)
-  const path = url.pathname
-  const reqHd = new Headers(req.headers)
-  reqHd.delete("host")
-
-  // 读取上游Docker Hub账号PAT
-  let upstreamAuth = ""
-  if (env.AUTH_USER && env.AUTH_PASS) {
-    upstreamAuth = basicAuth(env.AUTH_USER, env.AUTH_PASS)
-  }
-
-  // 处理token鉴权请求（重点：这里加上游认证）
-  if (regExps.token.test(path)) {
-    const authUrl = new URL("https://auth.docker.io/token" + url.search)
-    const newHd = new Headers(reqHd)
-    if (upstreamAuth) {
-      newHd.set("Authorization", upstreamAuth)
-    }
-    const authReq = new Request(authUrl, {
-      method: req.method,
-      headers: newHd,
-      body: req.body,
-      redirect: "follow",
-    })
-    return fetch(authReq)
-  }
-
-  // 处理v2镜像拉取请求，转发到 registry-1.docker.io
-  if (regExps.v2.test(path)) {
-    const targetUrl = new URL("https://registry-1.docker.io" + path + url.search)
-    const newHd = new Headers(reqHd)
-    newHd.set("Host", "registry-1.docker.io")
-    const proxyReq = new Request(targetUrl, {
-      method: req.method,
-      headers: newHd,
-      body: req.body,
-      redirect: "follow",
-    })
-    return fetch(proxyReq)
-  }
-
-  // 其他路径直接404
-  return new Response("Not found", { status: 404 })
+  v2: /^\/v2(\/.*)?$/
 }
 
 export default {
-  /**
-   * @param {Request} request
-   * @param {Env} env
-   * @param {ExecutionContext} ctx
-   * @returns {Promise<Response>}
-   */
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     if (request.method === "OPTIONS") {
       return new Response(null, PREFLIGHT_INIT)
     }
-    return handleRequest(request, env)
-  },
+    const url = new URL(request.url)
+    const reqHeaders = new Headers(request.headers)
+    reqHeaders.delete("host")
+
+    let upstreamAuth = ""
+    if (env.AUTH_USER && env.AUTH_PASS) {
+      upstreamAuth = basicAuth(env.AUTH_USER, env.AUTH_PASS)
+    }
+
+    if (regs.token.test(url.pathname)) {
+      const authUrl = new URL("https://auth.docker.io/token")
+      url.searchParams.forEach((v, k) => authUrl.searchParams.set(k, v))
+      const hd = new Headers(reqHeaders)
+      if (upstreamAuth) {
+        hd.set("Authorization", upstreamAuth)
+      }
+      return fetch(new Request(authUrl, {
+        method: request.method,
+        headers: hd,
+        body: request.body,
+        redirect: "follow"
+      }))
+    }
+
+    if (regs.v2.test(url.pathname)) {
+      const target = new URL("https://registry-1.docker.io" + url.pathname + url.search)
+      const hd = new Headers(reqHeaders)
+      hd.set("Host", "registry-1.docker.io")
+      return fetch(new Request(target, {
+        method: request.method,
+        headers: hd,
+        body: request.body,
+        redirect: "follow"
+      }))
+    }
+
+    return new Response("Not Found", { status: 404 })
+  }
 }
